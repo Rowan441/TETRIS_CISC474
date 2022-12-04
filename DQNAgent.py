@@ -4,12 +4,16 @@ from tqdm import tqdm
 import time
 import psutil
 
-
 import tensorflow as tf
 import numpy as np
 
-
 import Tetris
+
+## Memory Leak experimental fix:
+config = tf.ConfigProto()
+config.gpu_options.per_process_gpu_memory_fraction = 0.9 # fraction of memory
+config.gpu_options.visible_device_list = "0"
+tf.keras.backend.tensorflow_backendset_session(tf.Session(config=config))
 
 ### Environment
 WIDTH = 10
