@@ -1,7 +1,7 @@
 from copy import deepcopy
 import time
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import cv2
 import random
 
@@ -12,10 +12,6 @@ TETRIS_COLORS = {
     -1: [0, 0, 0],
     0 : [255, 255, 255],
     1 : [164,182,221],
-    2 : [208,146,146],
-    3 : [192,148,204],
-    4 : [162,208,192],
-    5 : [195,120,146],
 }
 
 class Tetris:
@@ -23,36 +19,40 @@ class Tetris:
     def __init__(self, width, height, seed=None) -> None:
         self.WIDTH = width
         self.HEIGHT = height
+        
 
-        if not seed:
-            self._random = random.Random()
+        if seed:
+            self._random_seed = seed
         else:
-            self._random = random.Random(seed)
+             self._random_seed = random.Random()
 
-        ### STATE:
-        self.board = [[0 for _ in range(self.HEIGHT)] for _ in range(self.WIDTH)]
-        self.terminal_state = False
-        self.highest_tile = -1
-        self.tiles_placed = 0
-        self._calc_next_tile()
+        self.reset_state()
 
-    def render(self) -> None:
+    def render(self, board=None, img_location="render.png") -> None:
         '''
         Draw board to screen
         '''
+        if board is None:
+            board = self.board
+
         pixel_data = []
-        for y in range(len(self.board[0])-1, -1, -1):
-            for x in range(len(self.board)):
-                pixel_data.append(TETRIS_COLORS[self.board[x][y]])
+        for y in range(len(board[0])-1, -1, -1):
+            for x in range(len(board)):
+                if (x, y) in self.latest_placement:
+                    pixel_data.append([221,182,182])
+                else:
+                    pixel_data.append(TETRIS_COLORS[board[x][y]])
 
 
         pixel_data = np.array(pixel_data).reshape(self.HEIGHT, self.WIDTH, 3).astype(np.uint8)
         img = Image.fromarray(pixel_data) 
         img = img.resize((self.WIDTH*32, self.HEIGHT*32), resample=Image.Resampling.NEAREST)
-        data = np.array(img)
 
-        cv2.imshow('a', data)
-        cv2.waitKey(1) # use waitKey(1) when rending multiple times
+        draw = ImageDraw.Draw(img)
+        
+        draw.text((20, 20), f"Next tile: {self.next_tile}", (0, 0, 0), font = ImageFont.truetype("arial.ttf", 18))
+
+        img.save(img_location)
 
     def get_actions(self):
         tetromino = Tetromino.PIECES[self.next_tile]
@@ -65,10 +65,14 @@ class Tetris:
         # if this fails action is illegal
         assert self._is_legal_placement(tetromino, point) 
 
-        self._place_tetronimo(tetromino, point)
+        highest_placement = self._place_tetronimo(tetromino, point)
+        if highest_placement > self.highest_tile:
+            self.highest_tile = highest_placement
         self.tiles_placed += 1
 
-        self._clear_lines()
+        cleared_rows = self._clear_lines()
+        self.highest_tile -= cleared_rows
+        self.total_lines_cleared += cleared_rows
 
         self._calc_next_tile()
 
@@ -76,24 +80,96 @@ class Tetris:
         if not self._is_legal_placement(Tetromino.PIECES[self.next_tile]["right"], self._spawn_point()):
             self.terminal_state = True
 
-        ## TODO: return reward?
+        reward = 2*cleared_rows*cleared_rows + (self.HEIGHT-self.highest_tile)
+        if self.terminal_state:
+            reward += -6
+
+        return reward, self.terminal_state
+        
+
+    def state_after_action(self, point, orientation):
+        '''
+        Returns a copy of the state as a numpy array after taking action: (point, orientation)
+
+        i.e. after placing the next tile at `point` with orientation `orientation`
+        '''
+        board = self.get_state_copy()
+        tetromino = Tetromino.PIECES[self.next_tile][orientation]
+        highest_placement = self._place_tetronimo(tetromino, point, board=board)
+        highest_tile = max(self.highest_tile, highest_placement)
+        
+        lines_cleared = self._clear_lines(board=board)
+        highest_tile -= lines_cleared
+        total_lines_cleared = self.total_lines_cleared + lines_cleared
+
+        # board = np.array(board).reshape(self.WIDTH*self.HEIGHT)
+
+        return [highest_tile, total_lines_cleared, self._calc_bumpiness(board), self._calc_num_holes(board)]
 
     def get_state(self):
-        ## TODO: return value that represent the state of the game (board, next_tile, score, e.t.c)
-        ## This might be used by the DQN algorithm
-        pass
+        # return np.array(self.board).reshape(self.WIDTH*self.HEIGHT) 
+        return [self.highest_tile, self.total_lines_cleared, self._calc_bumpiness(), self._calc_num_holes()]
+
+    def reset_state(self):
+        self._random = random.Random()
+
+        self.board = [[0 for _ in range(self.HEIGHT)] for _ in range(self.WIDTH)]
+        self.terminal_state = False
+        self.highest_tile = -1
+        self.tiles_placed = 0
+        self.total_lines_cleared = 0
+        self._calc_next_tile()
 
     def get_state_copy(self):
         ## TODO: same as above
         return deepcopy(self.board)
 
-    def _clear_lines(self) -> None:
+    def _calc_num_holes(self, board=None):
+        if board is None:
+            board = self.board
+
+        holes = 0
+
+        for x in range(self.WIDTH):
+            for y in range(self.HEIGHT-1, -1, -1):
+                if board[x][y] != 0:
+                    holes += sum([1 for x in board[x][:y] if x == 0])
+                    break
+
+        return holes
+
+    def _calc_bumpiness(self, board=None):
+        if board is None:
+            board = self.board
+
+        prev_col_height = None
+        bumpiness = 0
+
+        for x in range(self.WIDTH):
+                for y in range(self.HEIGHT-1, -1, -1):
+                    empty_col = True
+                    if board[x][y] != 0:
+                        if prev_col_height:
+                            bumpiness += abs(prev_col_height - y)
+                        prev_col_height = y
+                        empty_col = False
+                        break
+                    # if there are no tiles in this column, don't compare bumpiness of next col
+                if empty_col:
+                    prev_col_height = None
+
+        return bumpiness
+                
+    def _clear_lines(self, board = None) -> None:
+        if board == None:
+            board = self.board
+
         filled_rows = []
 
         for y in range(self.HEIGHT):
             isFilled = True
             for x in range(self.WIDTH):
-                if self.board[x][y] == 0:
+                if board[x][y] == 0:
                     isFilled = False
                     break
 
@@ -101,28 +177,40 @@ class Tetris:
                 filled_rows.insert(0, y)
 
 
-        for col in self.board:
+        for col in board:
             for y in filled_rows:
                 del col[y]
                 col.append(0)
 
-        self.highest_tile -= len(filled_rows)
+        # Return number of lines cleared
+        return len(filled_rows) 
 
-    def _place_tetronimo(self, tetromino: Tetromino.RotatedTetromino, point: Point, COLOR=None):
+    def _place_tetronimo(self, tetromino: Tetromino.RotatedTetromino, point: Point, COLOR=None, board=None):
+        if board == None:
+            board = self.board
         if COLOR == None:
             COLOR = random.randint(1, len(TETRIS_COLORS)-2) # -1 and 0 are black and white
 
+        highest_tile = -1
+        self.latest_placement = []
+
         for tile_offset in tetromino['points']:
             tile_pos = point + tile_offset
-            self.board[tile_pos.x][tile_pos.y] = COLOR
+            board[tile_pos.x][tile_pos.y] = COLOR
+            self.latest_placement.append((tile_pos.x, tile_pos.y))
 
-            if tile_pos.y > self.highest_tile:
-                self.highest_tile = tile_pos.y
+            if tile_pos.y > highest_tile:
+                highest_tile = tile_pos.y
 
-    def _remove_tetronimo(self, tetromino: Tetromino.RotatedTetromino, point: Point):
+        return highest_tile
+
+    def _remove_tetronimo(self, tetromino: Tetromino.RotatedTetromino, point: Point, board=None):
+        if board == None:
+            board = self.board
+
         for tile_offest in tetromino['points']:
             tile_pos = point + tile_offest
-            self.board[tile_pos.x][tile_pos.y] = 0
+            board[tile_pos.x][tile_pos.y] = 0
 
     def _is_legal_placement(self, tetromino: Tetromino.RotatedTetromino, point: Point):
         """
@@ -142,20 +230,19 @@ class Tetris:
         return True
 
 
-    def _bfs(self, tetromino: Tetromino.Tetrominos, point: Point, starting_orientation) -> list[tuple[int, str]]:
+    def _bfs(self, tetromino: Tetromino.Tetrominos, point: Point, starting_orientation: str) -> list[tuple[Point, str]]:
         '''
         breadth-first search of all possible placements for a `tetromino`
 
-        returns a list of tuples of shape: (tetromino_position: `int`, tetromino_orientation: `str`)
+        returns a list of tuples of shape: (tetromino_position: `Point`, tetromino_orientation: `str`)
         '''
         visited = []
         queue = []
-        end_states: list[tuple[int, str]] = []
+        end_states: list[tuple[Point, str]] = []
 
         visited.append((point, starting_orientation))
         queue.append((point, starting_orientation))
         while len(queue) != 0:
-            pass
             curr_point, curr_orientation = queue.pop()
 
             # If we cannot legally move down, then there must be something below us
@@ -207,38 +294,3 @@ class Tetris:
         Where all the tetrominoes spawn from at the top of the board
         '''
         return Point(self.WIDTH//2-1, min(self.HEIGHT-2, self.highest_tile+1))
-
-
-
-# t = Tetris(10, 8)
-
-# t._place_tetronimo(Tetromino.PIECES["T"]["up"], Point(0, 0))
-# t._place_tetronimo(Tetromino.PIECES["T"]["up"], Point(3, 0))
-# t._place_tetronimo(Tetromino.PIECES["T"]["up"], Point(6, 0))
-# t._place_tetronimo(Tetromino.PIECES["I"]["up"], Point(7, 0))
-# # t._place_tetronimo(Tetromino.PIECES["T"]["up"], Point(4, 2))
-# # t._place_tetronimo(Tetromino.PIECES["T"]["left"], Point(0, 2))
-# t.render()
-# time.sleep(1)
-
-# t._clear_lines()
-
-# t.render()
-
-# time.sleep(1)
-
-# end_s = t.get_actions()
-
-# print(len(end_s))
-
-# for s in end_s:
-#     print(t.next_tile)
-#     t._place_tetronimo(Tetromino.PIECES[t.next_tile][s[1]], s[0], COLOR=-1)
-#     t.render()
-#     print(s)
-#     time.sleep(0.2)
-#     t._remove_tetronimo(Tetromino.PIECES[t.next_tile][s[1]], s[0])
-
-
-# t.render()
-# # time.sleep(10)
