@@ -39,7 +39,7 @@ class Tetris:
         for y in range(len(board[0])-1, -1, -1):
             for x in range(len(board)):
                 if (x, y) in self.latest_placement:
-                    pixel_data.append([221,182,182])
+                    pixel_data.append([221,182,182] if board[x][y] == 1 else [110, 90, 90])
                 else:
                     pixel_data.append(TETRIS_COLORS[board[x][y]])
 
@@ -80,9 +80,9 @@ class Tetris:
         if not self._is_legal_placement(Tetromino.PIECES[self.next_tile]["right"], self._spawn_point()):
             self.terminal_state = True
 
-        reward = 2*cleared_rows*cleared_rows + (self.HEIGHT-self.highest_tile)
+        reward = 2*cleared_rows*cleared_rows + (self.HEIGHT-(self.highest_tile+1))
         if self.terminal_state:
-            reward += -6
+            reward += -10
 
         return reward, self.terminal_state
         
